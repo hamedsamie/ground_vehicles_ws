@@ -55,6 +55,9 @@ endif()
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
+
+  ament_add_gtest(test_state_machine tests/test_state_machine.cpp)
+  target_include_directories(test_state_machine PRIVATE include)
 endif()
 
 ament_package()
