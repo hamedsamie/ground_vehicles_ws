@@ -20,6 +20,8 @@ ground_vehicles_ws/
     └── ground_architect_node/
         ├── CMakeLists.txt
         ├── package.xml
+        ├── action/
+        │   └── ExecuteMission.action       # custom action
         ├── include/
         │   └── ground_architect_node/
         │       ├── ground_node.hpp         # LifecycleNode declaration
@@ -35,8 +37,14 @@ ground_vehicles_ws/
             ├── test_state_machine.cpp      # gtest unit tests for the FSM
             └── test_params.cpp             # gtest unit tests for parameter validation
             └── test_pubsub.cpp             # gtest: pub/sub with lifecycle transitions
-
+            └── test_services_actions.cpp   # Services + Action tests
 ```
+
+## Parameters
+Parameter | Type | Default | Description 
+--- | --- | --- | --- 
+loop_hz | int | 10 | Main loop frequency (1–100 Hz) 
+verbose | bool | true | Extra logging 
 
 ## Requirements
 
@@ -171,6 +179,67 @@ source ~/ground_vehicles_ws/install/setup.bash
 # Publish a command (in another shell or the same one)
 ros2 topic pub /cmd_in std_msgs/String "data: 'go'"
 # Expected on /telemetry: data: "ack:go"
+```
+
+### Manual Services & Action
+Terminal A - Run the node
+```bash
+source ~/ground_vehicles_ws/install/setup.bash
+ros2 run ground_architect_node ground_node
+```
+Terminal B - Control lifecycle and call services
+```bash
+source ~/ground_vehicles_ws/install/setup.bash
+
+# 1. Configure the node
+ros2 lifecycle set /ground_node configure
+# Expected output: "Transitioning successful"
+
+# 2. Activate the node
+ros2 lifecycle set /ground_node activate
+# Expected output: "Transitioning successful"
+
+# 3. Call reset service
+ros2 service call /reset std_srvs/srv/Trigger "{}"
+# Expected output:
+# success: True
+# message: "FSM reset to IDLE"
+
+# 4. Set FSM mode to READY
+ros2 service call /set_mode std_srvs/srv/SetBool "{data: false}"
+# Expected output:
+# success: True
+# message: "Mode set to READY"
+
+# 5. Set FSM mode to RUNNING
+ros2 service call /set_mode std_srvs/srv/SetBool "{data: true}"
+# Expected output:
+# success: True
+# message: "Mode set to RUNNING"
+```
+Terminal C - Send an Action goal
+Services
+```bash
+source ~/ground_vehicles_ws/install/setup.bash
+
+ros2 action send_goal /execute_mission ground_architect_node/action/ExecuteMission \ "{mission_id: demo, cycles: 3}" --feedback
+
+# Expected output (feedback + result from the action server):
+Waiting for an action server to become available...
+Sending goal:
+    mission_id: demo
+    cycles: 3
+Goal accepted with ID: <uuid>
+Feedback:
+    progress: 33%
+Feedback:
+    progress: 66%
+Feedback:
+    progress: 100%
+Result:
+    success: true
+    message: "Mission demo completed"
+Goal finished with status: SUCCEEDED
 ```
 
 ### Run unit tests (FSM + parameters)

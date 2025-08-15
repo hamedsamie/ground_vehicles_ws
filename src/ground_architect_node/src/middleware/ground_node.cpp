@@ -1,7 +1,8 @@
 #include "ground_architect_node/ground_node.hpp"
 
 #include <chrono>
-#include <lifecycle_msgs/msg/state.hpp> // for PRIMARY_STATE_ACTIVE
+#include <lifecycle_msgs/msg/state.hpp> // PRIMARY_STATE_ACTIVE
+#include <thread>
 #include <utility>
 
 using namespace std::chrono_literals;
@@ -40,6 +41,23 @@ GroundNode::CallbackReturn GroundNode::on_configure(const rclcpp_lifecycle::Stat
       "cmd_in", rclcpp::QoS(10),
       std::bind(&GroundNode::handle_cmd_msg, this, std::placeholders::_1));
 
+  // Services
+  reset_srv_ = this->create_service<std_srvs::srv::Trigger>(
+      "reset",
+      std::bind(&GroundNode::handle_reset, this, std::placeholders::_1, std::placeholders::_2));
+
+  set_mode_srv_ = this->create_service<std_srvs::srv::SetBool>(
+      "set_mode",
+      std::bind(&GroundNode::handle_set_mode, this, std::placeholders::_1, std::placeholders::_2));
+
+  // Action server
+  action_server_ = rclcpp_action::create_server<ExecuteMission>(
+      this->get_node_base_interface(), this->get_node_clock_interface(),
+      this->get_node_logging_interface(), this->get_node_waitables_interface(), "execute_mission",
+      std::bind(&GroundNode::handle_goal, this, std::placeholders::_1, std::placeholders::_2),
+      std::bind(&GroundNode::handle_cancel, this, std::placeholders::_1),
+      std::bind(&GroundNode::handle_accepted, this, std::placeholders::_1));
+
   // Timer prepared but paused until activation
   create_or_update_timer();
   if (timer_)
@@ -69,7 +87,6 @@ GroundNode::CallbackReturn GroundNode::on_activate(const rclcpp_lifecycle::State
 
   if (timer_)
     timer_->reset(); // start periodic work
-
   return CallbackReturn::SUCCESS;
 }
 
@@ -97,6 +114,9 @@ GroundNode::CallbackReturn GroundNode::on_cleanup(const rclcpp_lifecycle::State 
   status_pub_.reset();
   telemetry_pub_.reset();
   cmd_sub_.reset();
+  reset_srv_.reset();
+  set_mode_srv_.reset();
+  action_server_.reset();
 
   // Back to IDLE
   (void)fsm_.transition(OpState::IDLE);
@@ -110,9 +130,15 @@ GroundNode::CallbackReturn GroundNode::on_shutdown(const rclcpp_lifecycle::State
   status_pub_.reset();
   telemetry_pub_.reset();
   cmd_sub_.reset();
+  reset_srv_.reset();
+  set_mode_srv_.reset();
+  action_server_.reset();
   return CallbackReturn::SUCCESS;
 }
 
+// ----------
+// Parameters
+// ----------
 void GroundNode::declare_and_load_parameters()
 {
   // Declare with defaults if not already declared.
@@ -196,21 +222,14 @@ void GroundNode::apply_parameters_no_throw()
   try
   {
     create_or_update_timer();
-    // Only start the timer if we’re already active and running.
-    if (this->get_current_state().id() == lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE)
+    const bool active =
+        (this->get_current_state().id() == lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE);
+    if (active && fsm_.state() == OpState::RUNNING && timer_)
     {
-      if (fsm_.state() == OpState::RUNNING && timer_)
-      {
-        timer_->reset();
-      }
-      else if (timer_)
-      {
-        timer_->cancel();
-      }
+      timer_->reset();
     }
     else if (timer_)
     {
-      // Not active → keep timer paused
       timer_->cancel();
     }
   }
@@ -224,7 +243,6 @@ void GroundNode::create_or_update_timer()
 {
   // Convert Hz to period (milliseconds).
   const auto period_ms = std::chrono::milliseconds(1000 / loop_hz_);
-
   auto cb = [this]() {
     if (fsm_.state() == OpState::RUNNING && status_pub_ && status_pub_->is_activated())
     {
@@ -245,7 +263,6 @@ void GroundNode::create_or_update_timer()
   }
   else
   {
-    // Replace with a new timer;
     timer_ = this->create_wall_timer(period_ms, cb);
   }
   // Lifecycle state decides that whether to start teh timer or not.
@@ -253,6 +270,145 @@ void GroundNode::create_or_update_timer()
     timer_->cancel();
 }
 
+// --------
+// Services
+// --------
+void GroundNode::handle_reset(const std::shared_ptr<std_srvs::srv::Trigger::Request>,
+                              std::shared_ptr<std_srvs::srv::Trigger::Response> res)
+{
+  // Stop any periodic work
+  if (timer_)
+    timer_->cancel();
+
+  // Reset FSM to IDLE
+  fsm_.reset();
+  (void)fsm_.transition(OpState::IDLE);
+
+  res->success = true;
+  res->message = "FSM reset to IDLE; timer stopped.";
+}
+
+void GroundNode::handle_set_mode(const std::shared_ptr<std_srvs::srv::SetBool::Request> req,
+                                 std::shared_ptr<std_srvs::srv::SetBool::Response> res)
+{
+  // true  -> request RUNNING
+  // false -> request READY
+  const bool want_running = req->data;
+
+  OpState target = want_running ? OpState::RUNNING : OpState::READY;
+  if (!fsm_.can_transition(fsm_.state(), target))
+  {
+    res->success = false;
+    res->message = std::string("Illegal transition from ") + to_string(fsm_.state()) + " to " +
+                   to_string(target);
+    return;
+  }
+
+  (void)fsm_.transition(target, want_running ? "set_mode=true" : "set_mode=false");
+
+  // Respect lifecycle active state for timer control
+  const bool active =
+      (this->get_current_state().id() == lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE);
+  if (active && fsm_.state() == OpState::RUNNING && timer_)
+  {
+    timer_->reset();
+  }
+  else if (timer_)
+  {
+    timer_->cancel();
+  }
+
+  res->success = true;
+  res->message = std::string("FSM moved to ") + to_string(fsm_.state());
+}
+
+// -------------
+// Action Server
+// -------------
+rclcpp_action::GoalResponse
+GroundNode::handle_goal(const rclcpp_action::GoalUUID &,
+                        std::shared_ptr<const ExecuteMission::Goal> goal)
+{
+
+  const bool active =
+      (this->get_current_state().id() == lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE);
+  if (!(active && fsm_.state() == OpState::RUNNING))
+  {
+    if (verbose_)
+      RCLCPP_WARN(get_logger(), "Rejecting goal (node not active or FSM not RUNNING)");
+    return rclcpp_action::GoalResponse::REJECT;
+  }
+
+  if (!goal || goal->cycles <= 0)
+  {
+    if (verbose_)
+      RCLCPP_WARN(get_logger(), "Rejecting goal: invalid cycles (%d)", goal ? goal->cycles : -1);
+    return rclcpp_action::GoalResponse::REJECT;
+  }
+
+  if (verbose_)
+  {
+    RCLCPP_INFO(get_logger(), "Accepting goal mission_id='%s' cycles=%d", goal->mission_id.c_str(),
+                goal->cycles);
+  }
+  return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
+}
+
+rclcpp_action::CancelResponse GroundNode::handle_cancel(const std::shared_ptr<GoalHandleMission>)
+{
+  if (verbose_)
+    RCLCPP_INFO(get_logger(), "Cancel request received");
+  return rclcpp_action::CancelResponse::ACCEPT;
+}
+
+void GroundNode::handle_accepted(const std::shared_ptr<GoalHandleMission> goal_handle)
+{
+  // Execute in a background thread
+  std::thread{std::bind(&GroundNode::execute_mission, this, goal_handle)}.detach();
+}
+
+void GroundNode::execute_mission(const std::shared_ptr<GoalHandleMission> goal_handle)
+{
+  const auto goal = goal_handle->get_goal();
+  auto feedback = std::make_shared<ExecuteMission::Feedback>();
+  auto result = std::make_shared<ExecuteMission::Result>();
+
+  const int cycles = goal->cycles;
+  for (int i = 1; i <= cycles; ++i)
+  {
+    // Check cancel
+    if (goal_handle->is_canceling())
+    {
+      result->success = false;
+      result->message = "Canceled";
+      goal_handle->canceled(result);
+      if (verbose_)
+        RCLCPP_INFO(get_logger(), "Mission canceled");
+      return;
+    }
+
+    // Simulate work: publish feedback
+    feedback->progress = static_cast<float>(i) / static_cast<float>(cycles);
+    feedback->phase = "working";
+    goal_handle->publish_feedback(feedback);
+    if (verbose_)
+    {
+      RCLCPP_INFO(get_logger(), "Mission feedback: progress=%.2f", feedback->progress);
+    }
+
+    std::this_thread::sleep_for(100ms);
+  }
+
+  result->success = true;
+  result->message = "Mission completed";
+  goal_handle->succeed(result);
+  if (verbose_)
+    RCLCPP_INFO(get_logger(), "Mission succeeded");
+}
+
+// -------
+// Pub/Sub
+// -------
 void GroundNode::handle_cmd_msg(const std_msgs::msg::String::SharedPtr msg)
 {
   // Ignore unless lifecycle is ACTIVE and FSM is RUNNING
