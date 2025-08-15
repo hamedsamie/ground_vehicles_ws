@@ -1,0 +1,7 @@
+ground_node:
+  ros__parameters:
+    # Timer frequency in Hz, must be a positive integer.
+    loop_hz: 10
+
+    # For more informational logs.
+    verbose: true

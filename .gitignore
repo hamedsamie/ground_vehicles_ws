@@ -1,9 +1,17 @@
-# ROS 2 build artifacts
+# Root-level colcon artifacts
 /build/
 /install/
 /log/
+
+# Ignore nested build/install/log anywhere (if someone builds inside a package)
+**/build/
+**/install/
+**/log/
 
 # Python cache
 __pycache__/
 *.pyc
 
+# Editor/system
+.vscode/
+.DS_Store
