@@ -18,6 +18,9 @@ namespace ground_architect
  * - Runtime parameters (loop_hz, verbose) with validation and live updates.
  * - YAML-based initial parameter loading (via launch or --params-file).
  * - Timer period follows loop_hz; changes apply immediately when active.
+ * - Subscriber: "cmd_in" (std_msgs/String)
+ * - Lifecycle publisher: "telemetry" (std_msgs/String)
+ * - Subscriber ignores messages unless node is ACTIVE and FSM is RUNNING.
  */
 class GroundNode : public rclcpp_lifecycle::LifecycleNode
 {
@@ -35,15 +38,25 @@ protected:
   CallbackReturn on_shutdown(const rclcpp_lifecycle::State &state) override;
 
 private:
+  // -------------------------
+  // Internal state & members
+  // -------------------------
   StateMachine fsm_; // internal operational FSM
 
-  // Publisher for status messages (lifecycle-aware)
+  // Lifecycle-aware publishers (only publish when activated)
   rclcpp_lifecycle::LifecyclePublisher<std_msgs::msg::String>::SharedPtr status_pub_;
+  rclcpp_lifecycle::LifecyclePublisher<std_msgs::msg::String>::SharedPtr telemetry_pub_;
 
-  // Periodic timer (publishes status when running)
+  // Normal subscriber (we guard behavior in the callback)
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr cmd_sub_;
+
+  // Periodic timer for work / status publishing
   rclcpp::TimerBase::SharedPtr timer_;
 
-  int loop_hz_{10};    // positive integer: [1..100]
+  // ----------
+  // Parameters
+  // ----------
+  int loop_hz_{10};    // validated range: [1..100]
   bool verbose_{true}; // extra logs when true
 
   // Parameter callback handle must be kept alive
@@ -55,6 +68,11 @@ private:
   on_param_set(const std::vector<rclcpp::Parameter> &params); // validation + apply
   void apply_parameters_no_throw();                           // use current member values
   void create_or_update_timer();                              // create timer from loop_hz_
+
+  // ----------------
+  // Pub/Sub handlers
+  // ----------------
+  void handle_cmd_msg(const std_msgs::msg::String::SharedPtr msg);
 };
 
 } // namespace ground_architect

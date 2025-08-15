@@ -82,8 +82,16 @@ if(BUILD_TESTING)
   if(TARGET test_params)
     target_include_directories(test_params PRIVATE include)
     ament_target_dependencies(test_params rclcpp rclcpp_lifecycle rcl_interfaces)
-    # Use the PLAIN signature here too
     target_link_libraries(test_params ground_node_lib)
+  endif()
+
+  # Pub/Sub integration-ish test using an executor + lifecycle transitions
+  ament_add_gtest(test_pubsub tests/test_pubsub.cpp)
+  if(TARGET test_pubsub)
+    target_include_directories(test_pubsub PRIVATE include)
+    ament_target_dependencies(test_pubsub
+      rclcpp rclcpp_lifecycle rclcpp_action std_msgs lifecycle_msgs)
+    target_link_libraries(test_pubsub ground_node_lib)
   endif()
 endif()
 

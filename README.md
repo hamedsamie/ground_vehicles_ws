@@ -34,6 +34,7 @@ ground_vehicles_ws/
         └── tests/
             ├── test_state_machine.cpp      # gtest unit tests for the FSM
             └── test_params.cpp             # gtest unit tests for parameter validation
+            └── test_pubsub.cpp             # gtest: pub/sub with lifecycle transitions
 
 ```
 
@@ -145,6 +146,31 @@ ros2 param set /ground_node verbose false
 
 # 4) Activate (if you want it to start publishing)
 ros2 lifecycle set /ground_node activate
+```
+
+### Manual pub/sub check
+Terminal A
+```bash
+source ~/ground_vehicles_ws/install/setup.bash
+ros2 run ground_architect_node ground_node
+```
+
+Terminal B
+```bash
+source ~/ground_vehicles_ws/install/setup.bash
+ros2 lifecycle set /ground_node configure
+ros2 lifecycle set /ground_node activate
+
+# Watch telemetry
+ros2 topic echo /telemetry
+```
+Terminal C
+```bash
+source ~/ground_vehicles_ws/install/setup.bash
+
+# Publish a command (in another shell or the same one)
+ros2 topic pub /cmd_in std_msgs/String "data: 'go'"
+# Expected on /telemetry: data: "ack:go"
 ```
 
 ### Run unit tests (FSM + parameters)

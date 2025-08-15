@@ -1,9 +1,8 @@
 #include "ground_architect_node/ground_node.hpp"
 
 #include <chrono>
+#include <lifecycle_msgs/msg/state.hpp> // for PRIMARY_STATE_ACTIVE
 #include <utility>
-
-#include <lifecycle_msgs/msg/state.hpp>
 
 using namespace std::chrono_literals;
 
@@ -29,15 +28,19 @@ GroundNode::CallbackReturn GroundNode::on_configure(const rclcpp_lifecycle::Stat
   fsm_.reset();
   (void)fsm_.transition(OpState::IDLE);
 
-  // 1) Declare parameters with defaults (if not already declared),
-  //    then load current values (from YAML or defaults).
+  // Parameters
   declare_and_load_parameters();
 
-  // 2) Create lifecycle-aware publisher
+  // Lifecycle-aware publishers
   status_pub_ = this->create_publisher<std_msgs::msg::String>("status", rclcpp::QoS(10));
+  telemetry_pub_ = this->create_publisher<std_msgs::msg::String>("telemetry", rclcpp::QoS(10));
 
-  // 3) Create or update timer to respect loop_hz_.
-  //    We *prepare* the timer here but keep it paused until activation.
+  // Subscriber: guard behavior in callback against lifecycle/FSM
+  cmd_sub_ = this->create_subscription<std_msgs::msg::String>(
+      "cmd_in", rclcpp::QoS(10),
+      std::bind(&GroundNode::handle_cmd_msg, this, std::placeholders::_1));
+
+  // Timer prepared but paused until activation
   create_or_update_timer();
   if (timer_)
     timer_->cancel();
@@ -57,14 +60,15 @@ GroundNode::CallbackReturn GroundNode::on_activate(const rclcpp_lifecycle::State
 
   if (status_pub_)
     status_pub_->on_activate();
+  if (telemetry_pub_)
+    telemetry_pub_->on_activate();
 
-  // Lifecycle activation → internal FSM READY → RUNNING (demo behavior)
+  // Lifecycle activation → internal FSM READY → RUNNING
   (void)fsm_.transition(OpState::READY);
   (void)fsm_.transition(OpState::RUNNING);
 
-  // Start periodic work
   if (timer_)
-    timer_->reset();
+    timer_->reset(); // start periodic work
 
   return CallbackReturn::SUCCESS;
 }
@@ -77,6 +81,8 @@ GroundNode::CallbackReturn GroundNode::on_deactivate(const rclcpp_lifecycle::Sta
     timer_->cancel();
   if (status_pub_)
     status_pub_->on_deactivate();
+  if (telemetry_pub_)
+    telemetry_pub_->on_deactivate();
 
   // Back to READY (configured and prepared, but not actively running)
   (void)fsm_.transition(OpState::READY);
@@ -89,6 +95,8 @@ GroundNode::CallbackReturn GroundNode::on_cleanup(const rclcpp_lifecycle::State 
 
   timer_.reset();
   status_pub_.reset();
+  telemetry_pub_.reset();
+  cmd_sub_.reset();
 
   // Back to IDLE
   (void)fsm_.transition(OpState::IDLE);
@@ -100,6 +108,8 @@ GroundNode::CallbackReturn GroundNode::on_shutdown(const rclcpp_lifecycle::State
   RCLCPP_INFO(get_logger(), "on_shutdown(): final cleanup");
   timer_.reset();
   status_pub_.reset();
+  telemetry_pub_.reset();
+  cmd_sub_.reset();
   return CallbackReturn::SUCCESS;
 }
 
@@ -215,7 +225,6 @@ void GroundNode::create_or_update_timer()
   // Convert Hz to period (milliseconds).
   const auto period_ms = std::chrono::milliseconds(1000 / loop_hz_);
 
-  // Create the timer to use the new period.
   auto cb = [this]() {
     if (fsm_.state() == OpState::RUNNING && status_pub_ && status_pub_->is_activated())
     {
@@ -242,6 +251,35 @@ void GroundNode::create_or_update_timer()
   // Lifecycle state decides that whether to start teh timer or not.
   if (timer_)
     timer_->cancel();
+}
+
+void GroundNode::handle_cmd_msg(const std_msgs::msg::String::SharedPtr msg)
+{
+  // Ignore unless lifecycle is ACTIVE and FSM is RUNNING
+  const bool active =
+      (this->get_current_state().id() == lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE);
+  if (!(active && fsm_.state() == OpState::RUNNING))
+  {
+    if (verbose_)
+    {
+      RCLCPP_INFO(get_logger(), "Ignoring cmd '%s' (node not active or FSM not RUNNING)",
+                  msg ? msg->data.c_str() : "<null>");
+    }
+    return;
+  }
+
+  if (verbose_)
+  {
+    RCLCPP_INFO(get_logger(), "Handling cmd: %s", msg->data.c_str());
+  }
+
+  // For now, simple echo → telemetry ack
+  if (telemetry_pub_ && telemetry_pub_->is_activated())
+  {
+    auto out = std_msgs::msg::String();
+    out.data = std::string("ack:") + msg->data;
+    telemetry_pub_->publish(out);
+  }
 }
 
 } // namespace ground_architect
