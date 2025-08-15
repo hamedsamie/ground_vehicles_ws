@@ -18,21 +18,32 @@ find_package(rcl_interfaces REQUIRED)
 
 include_directories(include)
 
-add_executable(ground_node
-  src/middleware/main.cpp
+# ------------------------------------------------------------------------------
+# Build the node implementation as a reusable library (so tests can link to it)
+# ------------------------------------------------------------------------------
+add_library(ground_node_lib
   src/middleware/ground_node.cpp
 )
+ament_target_dependencies(ground_node_lib
+  rclcpp rclcpp_lifecycle rclcpp_action std_msgs lifecycle_msgs rcl_interfaces
+)
+target_include_directories(ground_node_lib PUBLIC include)
 
-# Link the executable against the ROS 2 libs it uses
+# ---------------------------------------------------------
+# Small executable that just provides main() and links lib
+# ---------------------------------------------------------
+add_executable(ground_node
+  src/middleware/main.cpp
+)
+# Use the PLAIN signature (no PRIVATE/PUBLIC/INTERFACE) to match ament style
+target_link_libraries(ground_node ground_node_lib)
 ament_target_dependencies(ground_node
-  rclcpp
-  rclcpp_lifecycle
-  rclcpp_action
-  std_msgs
-  lifecycle_msgs
-  rcl_interfaces
+  rclcpp rclcpp_lifecycle rclcpp_action std_msgs lifecycle_msgs rcl_interfaces
 )
 
+# -------------------------
+# Install targets & headers
+# -------------------------
 install(TARGETS ground_node
   DESTINATION lib/${PROJECT_NAME}
 )
@@ -41,6 +52,9 @@ install(DIRECTORY include/
   DESTINATION include
 )
 
+# --------------------------------
+# Install config/launch if present
+# --------------------------------
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/config")
   install(DIRECTORY config
     DESTINATION share/${PROJECT_NAME}
@@ -53,11 +67,24 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/launch")
   )
 endif()
 
+# ---------------
+# Tests (gtest)
+# ---------------
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
 
+  # Pure C++ FSM test
   ament_add_gtest(test_state_machine tests/test_state_machine.cpp)
   target_include_directories(test_state_machine PRIVATE include)
+
+  # Parameter handling test (links to node implementation)
+  ament_add_gtest(test_params tests/test_params.cpp)
+  if(TARGET test_params)
+    target_include_directories(test_params PRIVATE include)
+    ament_target_dependencies(test_params rclcpp rclcpp_lifecycle rcl_interfaces)
+    # Use the PLAIN signature here too
+    target_link_libraries(test_params ground_node_lib)
+  endif()
 endif()
 
 ament_package()

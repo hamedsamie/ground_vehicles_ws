@@ -6,7 +6,7 @@ We follow a **clean separation of concerns**:
 - **middleware/** – ROS 2–specific code (LifecycleNode, publishers/subscribers, services, actions, timers)
 - **algorithm/** – pure C++ (no ROS includes)
 - **state machine** – pure C++ internal operational FSM (independent from ROS lifecycle)
-- **config/** – YAML parameter files (used in later commits)
+- **config/** – YAML parameter files
 - **tests/** – unit & integration tests
 
 ---
@@ -32,7 +32,9 @@ ground_vehicles_ws/
         ├── config/
         ├── launch/
         └── tests/
-            └── test_state_machine.cpp      # gtest unit tests for the FSM
+            ├── test_state_machine.cpp      # gtest unit tests for the FSM
+            └── test_params.cpp             # gtest unit tests for parameter validation
+
 ```
 
 ## Requirements
@@ -81,13 +83,13 @@ source install/setup.bash
 
 ## How to test (manual + unit tests)
 ### Test the node manually (two terminals)
-Terminal 1 — run the node
+Terminal A — run the node
 ```bash
 source ~/ground_vehicles_ws/install/setup.bash
 ros2 run ground_architect_node ground_node
 ```
 
-Terminal 2 — drive the lifecycle
+Terminal B — drive the lifecycle
 ```bash
 source ~/ground_vehicles_ws/install/setup.bash
 # Inspect initial state
@@ -113,7 +115,39 @@ Expected:
 - **/status** prints running ~every 0.1s only when the node is Activated and the internal FSM is/status prints running ~every 0.1s only when the node is Activated and the internal FSM is RUNNING.
 - After deactivate or cleanup, messages stop.
 
-### Run unit tests (FSM)
+### Test parameter validation manually
+Terminal A
+```bash
+# Run the node
+source ~/ros2_ws/install/setup.bash
+ros2 run ground_architect_node ground_node
+```
+
+Terminal B
+```bash
+# Drive lifecycle, then set params
+source ~/ros2_ws/install/setup.bash
+
+# Make sure the node is there and named correctly
+ros2 node list
+# should show: /ground_node
+
+# 2) Configure the node 
+ros2 lifecycle set /ground_node configure
+
+# (optional) Check which params are declared now
+ros2 param list /ground_node
+# you should see loop_hz and verbose in the list
+
+# 3) Set parameters successfully
+ros2 param set /ground_node loop_hz 20
+ros2 param set /ground_node verbose false
+
+# 4) Activate (if you want it to start publishing)
+ros2 lifecycle set /ground_node activate
+```
+
+### Run unit tests (FSM + parameters)
 From the workspace root:
 ```bash
 # Build (if not already built)
