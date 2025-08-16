@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <lifecycle_msgs/msg/state.hpp> // PRIMARY_STATE_ACTIVE
+#include <sstream>
 #include <thread>
 #include <utility>
 
@@ -32,7 +33,11 @@ GroundNode::CallbackReturn GroundNode::on_configure(const rclcpp_lifecycle::Stat
   // Parameters
   declare_and_load_parameters();
 
-  // Lifecycle-aware publishers
+  // Initialize algorithm with current config; set mode to READY (inactive)
+  controller_.init(algo::Config{gain_, saturation_});
+  controller_.set_mode(algo::Mode::READY);
+
+  // Publishers
   status_pub_ = this->create_publisher<std_msgs::msg::String>("status", rclcpp::QoS(10));
   telemetry_pub_ = this->create_publisher<std_msgs::msg::String>("telemetry", rclcpp::QoS(10));
 
@@ -65,8 +70,8 @@ GroundNode::CallbackReturn GroundNode::on_configure(const rclcpp_lifecycle::Stat
 
   if (verbose_)
   {
-    RCLCPP_INFO(get_logger(), "Configured with loop_hz=%d verbose=%s", loop_hz_,
-                verbose_ ? "true" : "false");
+    RCLCPP_INFO(get_logger(), "Configured with loop_hz=%d verbose=%s gain=%.3f sat=%.3f", loop_hz_,
+                verbose_ ? "true" : "false", gain_, saturation_);
   }
 
   return CallbackReturn::SUCCESS;
@@ -81,9 +86,9 @@ GroundNode::CallbackReturn GroundNode::on_activate(const rclcpp_lifecycle::State
   if (telemetry_pub_)
     telemetry_pub_->on_activate();
 
-  // Lifecycle activation → internal FSM READY → RUNNING
   (void)fsm_.transition(OpState::READY);
   (void)fsm_.transition(OpState::RUNNING);
+  sync_algo_mode();
 
   if (timer_)
     timer_->reset(); // start periodic work
@@ -101,8 +106,9 @@ GroundNode::CallbackReturn GroundNode::on_deactivate(const rclcpp_lifecycle::Sta
   if (telemetry_pub_)
     telemetry_pub_->on_deactivate();
 
-  // Back to READY (configured and prepared, but not actively running)
   (void)fsm_.transition(OpState::READY);
+  sync_algo_mode();
+
   return CallbackReturn::SUCCESS;
 }
 
@@ -118,8 +124,9 @@ GroundNode::CallbackReturn GroundNode::on_cleanup(const rclcpp_lifecycle::State 
   set_mode_srv_.reset();
   action_server_.reset();
 
-  // Back to IDLE
   (void)fsm_.transition(OpState::IDLE);
+  sync_algo_mode();
+
   return CallbackReturn::SUCCESS;
 }
 
@@ -141,20 +148,25 @@ GroundNode::CallbackReturn GroundNode::on_shutdown(const rclcpp_lifecycle::State
 // ----------
 void GroundNode::declare_and_load_parameters()
 {
-  // Declare with defaults if not already declared.
   this->declare_parameter<int>("loop_hz", 10);
   this->declare_parameter<bool>("verbose", true);
+  this->declare_parameter<double>("gain", 1.0);
+  this->declare_parameter<double>("saturation", 10.0);
 
-  // Read current values
   this->get_parameter("loop_hz", loop_hz_);
   this->get_parameter("verbose", verbose_);
+  this->get_parameter("gain", gain_);
+  this->get_parameter("saturation", saturation_);
 
-  // Validate immediately
   if (loop_hz_ < 1 || loop_hz_ > 100)
   {
-    RCLCPP_WARN(get_logger(),
-                "Invalid 'loop_hz'=%d in parameters (expected 1..100). Clamping to 10.", loop_hz_);
+    RCLCPP_WARN(get_logger(), "Invalid 'loop_hz'=%d (expected 1..100). Clamping to 10.", loop_hz_);
     loop_hz_ = 10;
+  }
+  if (saturation_ <= 0.0)
+  {
+    RCLCPP_WARN(get_logger(), "Invalid 'saturation'=%.3f (must be >0). Using 10.0.", saturation_);
+    saturation_ = 10.0;
   }
 }
 
@@ -163,6 +175,8 @@ GroundNode::on_param_set(const std::vector<rclcpp::Parameter> &params)
 {
   int new_loop_hz = loop_hz_;
   bool new_verbose = verbose_;
+  double new_gain = gain_;
+  double new_sat = saturation_;
 
   // Parameter validation
   for (const auto &p : params)
@@ -197,17 +211,51 @@ GroundNode::on_param_set(const std::vector<rclcpp::Parameter> &params)
       }
       new_verbose = p.as_bool();
     }
+    else if (p.get_name() == "gain")
+    {
+      if (p.get_type() != rclcpp::ParameterType::PARAMETER_DOUBLE)
+      {
+        rcl_interfaces::msg::SetParametersResult r;
+        r.successful = false;
+        r.reason = "'gain' must be a double";
+        return r;
+      }
+      new_gain = p.as_double();
+    }
+    else if (p.get_name() == "saturation")
+    {
+      if (p.get_type() != rclcpp::ParameterType::PARAMETER_DOUBLE)
+      {
+        rcl_interfaces::msg::SetParametersResult r;
+        r.successful = false;
+        r.reason = "'saturation' must be a double";
+        return r;
+      }
+      double v = p.as_double();
+      if (v <= 0.0)
+      {
+        rcl_interfaces::msg::SetParametersResult r;
+        r.successful = false;
+        r.reason = "'saturation' must be > 0";
+        return r;
+      }
+      new_sat = v;
+    }
   }
 
-  // All validations passed → apply updates atomically
   loop_hz_ = new_loop_hz;
   verbose_ = new_verbose;
+  gain_ = new_gain;
+  saturation_ = new_sat;
+
+  // Push new config to algorithm and update timer rate
+  controller_.update_config(algo::Config{gain_, saturation_});
   apply_parameters_no_throw();
 
   if (verbose_)
   {
-    RCLCPP_INFO(get_logger(), "Updated parameters: loop_hz=%d verbose=%s", loop_hz_,
-                verbose_ ? "true" : "false");
+    RCLCPP_INFO(get_logger(), "Params updated: loop_hz=%d verbose=%s gain=%.3f sat=%.3f", loop_hz_,
+                verbose_ ? "true" : "false", gain_, saturation_);
   }
 
   rcl_interfaces::msg::SetParametersResult ok;
@@ -243,16 +291,18 @@ void GroundNode::create_or_update_timer()
 {
   // Convert Hz to period (milliseconds).
   const auto period_ms = std::chrono::milliseconds(1000 / loop_hz_);
+
   auto cb = [this]() {
     if (fsm_.state() == OpState::RUNNING && status_pub_ && status_pub_->is_activated())
     {
+      // Publish status and algorithm y
       std_msgs::msg::String msg;
-      msg.data = "running";
+      std::ostringstream oss;
+      oss << "running y=" << controller_.y();
+      msg.data = oss.str();
       status_pub_->publish(msg);
       if (verbose_)
-      {
-        RCLCPP_INFO(this->get_logger(), "Published status: %s", msg.data.c_str());
-      }
+        RCLCPP_INFO(this->get_logger(), "Status: %s", msg.data.c_str());
     }
   };
 
@@ -284,8 +334,11 @@ void GroundNode::handle_reset(const std::shared_ptr<std_srvs::srv::Trigger::Requ
   fsm_.reset();
   (void)fsm_.transition(OpState::IDLE);
 
+  controller_.reset();
+  controller_.set_mode(algo::Mode::IDLE);
+
   res->success = true;
-  res->message = "FSM reset to IDLE; timer stopped.";
+  res->message = "FSM reset to IDLE; algorithm reset; timer stopped.";
 }
 
 void GroundNode::handle_set_mode(const std::shared_ptr<std_srvs::srv::SetBool::Request> req,
@@ -294,7 +347,6 @@ void GroundNode::handle_set_mode(const std::shared_ptr<std_srvs::srv::SetBool::R
   // true  -> request RUNNING
   // false -> request READY
   const bool want_running = req->data;
-
   OpState target = want_running ? OpState::RUNNING : OpState::READY;
   if (!fsm_.can_transition(fsm_.state(), target))
   {
@@ -305,6 +357,7 @@ void GroundNode::handle_set_mode(const std::shared_ptr<std_srvs::srv::SetBool::R
   }
 
   (void)fsm_.transition(target, want_running ? "set_mode=true" : "set_mode=false");
+  sync_algo_mode();
 
   // Respect lifecycle active state for timer control
   const bool active =
@@ -319,7 +372,8 @@ void GroundNode::handle_set_mode(const std::shared_ptr<std_srvs::srv::SetBool::R
   }
 
   res->success = true;
-  res->message = std::string("FSM moved to ") + to_string(fsm_.state());
+  res->message = std::string("FSM moved to ") + to_string(fsm_.state()) +
+                 " ; algo=" + algo::to_string(controller_.mode());
 }
 
 // -------------
@@ -387,13 +441,16 @@ void GroundNode::execute_mission(const std::shared_ptr<GoalHandleMission> goal_h
       return;
     }
 
-    // Simulate work: publish feedback
+    // Make the algorithm "do work" each cycle.
+    (void)controller_.step(algo::Input{1.0});
+
     feedback->progress = static_cast<float>(i) / static_cast<float>(cycles);
     feedback->phase = "working";
     goal_handle->publish_feedback(feedback);
     if (verbose_)
     {
-      RCLCPP_INFO(get_logger(), "Mission feedback: progress=%.2f", feedback->progress);
+      RCLCPP_INFO(get_logger(), "Mission feedback: progress=%.2f y=%.3f", feedback->progress,
+                  controller_.y());
     }
 
     std::this_thread::sleep_for(100ms);
@@ -403,12 +460,40 @@ void GroundNode::execute_mission(const std::shared_ptr<GoalHandleMission> goal_h
   result->message = "Mission completed";
   goal_handle->succeed(result);
   if (verbose_)
-    RCLCPP_INFO(get_logger(), "Mission succeeded");
+    RCLCPP_INFO(get_logger(), "Mission succeeded, y=%.3f", controller_.y());
 }
 
 // -------
 // Pub/Sub
 // -------
+bool GroundNode::try_parse_u(const std::string &s, double &out_u) const
+{
+  // Accept formats like: "u:1.25" or "u=-0.5"
+  const auto pos_colon = s.find(':');
+  const auto pos_eq = s.find('=');
+  size_t pos = std::string::npos;
+  if (pos_colon != std::string::npos)
+    pos = pos_colon;
+  else if (pos_eq != std::string::npos)
+    pos = pos_eq;
+  if (pos == std::string::npos)
+    return false;
+
+  const auto key = s.substr(0, pos);
+  if (key != "u")
+    return false;
+
+  try
+  {
+    out_u = std::stod(s.substr(pos + 1));
+    return true;
+  }
+  catch (...)
+  {
+    return false;
+  }
+}
+
 void GroundNode::handle_cmd_msg(const std_msgs::msg::String::SharedPtr msg)
 {
   // Ignore unless lifecycle is ACTIVE and FSM is RUNNING
@@ -424,18 +509,74 @@ void GroundNode::handle_cmd_msg(const std_msgs::msg::String::SharedPtr msg)
     return;
   }
 
-  if (verbose_)
+  double u = 0.0;
+  bool parsed = msg && try_parse_u(msg->data, u);
+
+  if (parsed)
   {
-    RCLCPP_INFO(get_logger(), "Handling cmd: %s", msg->data.c_str());
+    auto out = controller_.step(algo::Input{u});
+    if (telemetry_pub_ && telemetry_pub_->is_activated())
+    {
+      std_msgs::msg::String t;
+      std::ostringstream oss;
+      oss << "y=" << out.y << " note=" << out.note;
+      t.data = oss.str();
+      telemetry_pub_->publish(t);
+    }
+    if (verbose_)
+    {
+      RCLCPP_INFO(get_logger(), "cmd u=%.3f -> y=%.3f (%s)", u, controller_.y(), out.note.c_str());
+    }
+  }
+  else
+  {
+    // Fallback
+    if (telemetry_pub_ && telemetry_pub_->is_activated())
+    {
+      auto out = std_msgs::msg::String();
+      out.data = std::string("ack:") + (msg ? msg->data : "");
+      telemetry_pub_->publish(out);
+    }
+    if (verbose_)
+    {
+      RCLCPP_INFO(get_logger(), "cmd not parsed as 'u:<value>', ack only");
+    }
+  }
+}
+
+// -------
+// Helpers
+// -------
+void GroundNode::sync_algo_mode()
+{
+  // Keep the algorithm mode aligned with our internal FSM.
+  // Map missing/unknown states conservatively to IDLE or READY.
+  algo::Mode m = algo::Mode::IDLE;
+
+  switch (fsm_.state())
+  {
+  case OpState::UNINITIALIZED: // be conservative before first configure
+    m = algo::Mode::IDLE;
+    break;
+  case OpState::IDLE:
+    m = algo::Mode::IDLE;
+    break;
+  case OpState::READY:
+    m = algo::Mode::READY;
+    break;
+  case OpState::RUNNING:
+    m = algo::Mode::RUNNING;
+    break;
+  case OpState::ERROR:
+    m = algo::Mode::READY;
+    break;
+  default:
+    // Fallback for any future/unknown states
+    m = algo::Mode::IDLE;
+    break;
   }
 
-  // For now, simple echo → telemetry ack
-  if (telemetry_pub_ && telemetry_pub_->is_activated())
-  {
-    auto out = std_msgs::msg::String();
-    out.data = std::string("ack:") + msg->data;
-    telemetry_pub_->publish(out);
-  }
+  controller_.set_mode(m);
 }
 
 } // namespace ground_architect

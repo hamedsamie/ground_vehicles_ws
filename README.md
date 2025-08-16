@@ -25,12 +25,15 @@ ground_vehicles_ws/
         ├── include/
         │   └── ground_architect_node/
         │       ├── ground_node.hpp         # LifecycleNode declaration
-        │       └── state_machine.hpp       # Internal FSM
+        │       ├── state_machine.hpp       # Internal FSM
+        │       └── algorithm/
+        │           └── controller.hpp      # Algorithm interface
         ├── src/
         │   ├── middleware/
         │   │   ├── ground_node.cpp         # LifecycleNode implementation
         │   │   └── main.cpp                # Node entry point
         │   └── algorithm/
+        │       └── controller.cpp          # Algorithm implementation
         ├── config/
         ├── launch/
         └── tests/
@@ -38,6 +41,7 @@ ground_vehicles_ws/
             └── test_params.cpp             # gtest unit tests for parameter validation
             └── test_pubsub.cpp             # gtest: pub/sub with lifecycle transitions
             └── test_services_actions.cpp   # Services + Action tests
+            └── test_algorithm.cpp          # gtest: algorithm unit tests
 ```
 
 ## Parameters
@@ -240,6 +244,46 @@ Result:
     success: true
     message: "Mission demo completed"
 Goal finished with status: SUCCEEDED
+```
+
+### Manual Algorithm Tests
+Terminal A - Run the node
+```bash
+source ~/ground_vehicles_ws/install/setup.bash
+ros2 run ground_architect_node ground_node
+
+ros2 topic echo /status
+```
+Terminal B - Drive lifecycle and send input
+```bash
+source ~/ground_vehicles_ws/install/setup.bash
+ros2 lifecycle set /ground_node configure
+ros2 lifecycle set /ground_node activate
+```
+
+Terminal C - Observe telemetry
+```bash
+source ~/ground_vehicles_ws/install/setup.bash
+
+# Step 1: u=1.5 → y becomes 1.5
+ros2 topic pub /cmd_in std_msgs/String "data: 'u:1.5'" -1
+
+# Step 2: u=2.0 → y becomes 3.5
+ros2 topic pub /cmd_in std_msgs/String "data: 'u:2.0'" -1
+
+# Step 3: a huge u to hit the clamp → y clamps to +10.0
+ros2 topic pub /cmd_in std_msgs/String "data: 'u:100.0'" -1
+```
+
+Terminal C - Observe telemetry
+```bash
+ros2 topic echo /telemetry
+
+#Expected telemetry lines (order may interleave with timer/status logs):
+
+- After u:1.5: y=1.5 note=ok
+- After u:2.0: y=3.5 note=ok
+- After u:100.0: y=10 note=ok (clamped by saturation)
 ```
 
 ### Run unit tests (FSM + parameters)

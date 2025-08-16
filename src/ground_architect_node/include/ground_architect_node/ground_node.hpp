@@ -9,24 +9,12 @@
 #include <std_srvs/srv/trigger.hpp>
 
 #include "ground_architect_node/action/execute_mission.hpp" // generated from action/
+#include "ground_architect_node/algorithm/controller.hpp"
 #include "ground_architect_node/state_machine.hpp"
 
 namespace ground_architect
 {
 
-/**
- * @brief Lifecycle-aware ROS 2 node for the Ground Architect assignment.
- *
- * - Implements standard ROS lifecycle states (configure, activate, etc.)
- * - Manages an internal operational FSM for runtime behavior
- * - Publishes status messages only when activated and in RUNNING mode
- * - Runtime parameters (loop_hz, verbose) with validation and live updates.
- * - YAML-based initial parameter loading (via launch or --params-file).
- * - Timer period follows loop_hz; changes apply immediately when active.
- * - Subscriber: "cmd_in" (std_msgs/String)
- * - Lifecycle publisher: "telemetry" (std_msgs/String)
- * - Subscriber ignores messages unless node is ACTIVE and FSM is RUNNING.
- */
 class GroundNode : public rclcpp_lifecycle::LifecycleNode
 {
 public:
@@ -46,26 +34,31 @@ protected:
   CallbackReturn on_shutdown(const rclcpp_lifecycle::State &state) override;
 
 private:
-  // -------------------------
-  // Internal state & members
-  // -------------------------
-  StateMachine fsm_; // internal operational FSM.
+  // ------------
+  // Internal FSM
+  // ------------
+  StateMachine fsm_;
 
-  // Publishers (lifecycle-aware)
+  // -------------------------
+  // Pure algorithm module
+  // -------------------------
+  algo::Controller controller_;
+
+  // -------------------------
+  // Publishers / Subscribers
+  // -------------------------
   rclcpp_lifecycle::LifecyclePublisher<std_msgs::msg::String>::SharedPtr status_pub_;
   rclcpp_lifecycle::LifecyclePublisher<std_msgs::msg::String>::SharedPtr telemetry_pub_;
-
-  // Subscriber (guarded in callback by lifecycle/FSM state)
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr cmd_sub_;
-
-  // Periodic timer for work / status publishing
   rclcpp::TimerBase::SharedPtr timer_;
 
   // ----------
   // Parameters
   // ----------
-  int loop_hz_{10};    // validated [1..100]
-  bool verbose_{true}; // extra logs
+  int loop_hz_{10};         // [1..100]
+  bool verbose_{true};      // extra logs
+  double gain_{1.0};        // algorithm parameter
+  double saturation_{10.0}; // algorithm parameter
 
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr on_set_param_cb_;
 
@@ -97,13 +90,16 @@ private:
   rclcpp_action::CancelResponse handle_cancel(const std::shared_ptr<GoalHandleMission> goal_handle);
 
   void handle_accepted(const std::shared_ptr<GoalHandleMission> goal_handle);
-
   void execute_mission(const std::shared_ptr<GoalHandleMission> goal_handle);
 
   // ---------------
   // Pub/Sub handler
   // ---------------
   void handle_cmd_msg(const std_msgs::msg::String::SharedPtr msg);
+  bool try_parse_u(const std::string &s, double &out_u) const;
+
+  // Keep algorithm mode aligned with FSM
+  void sync_algo_mode();
 };
 
 } // namespace ground_architect

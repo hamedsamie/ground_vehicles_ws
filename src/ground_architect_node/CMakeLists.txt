@@ -40,14 +40,19 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   DEPENDENCIES builtin_interfaces
 )
 
-set(GENERATED_ROSIDL_CPP_DIR ${CMAKE_CURRENT_BINARY_DIR}/rosidl_generator_cpp)
-ament_export_dependencies(rosidl_default_runtime)
-
-# Path to generated C++ headers
+# Path to generated C++ headers (so targets can include them)
 set(GENERATED_ROSIDL_CPP_DIR ${CMAKE_CURRENT_BINARY_DIR}/rosidl_generator_cpp)
 
 # Export runtime
 ament_export_dependencies(rosidl_default_runtime)
+
+# ===========================
+# Pure algorithm lib (no ROS)
+# ===========================
+add_library(algo_core
+  src/algorithm/controller.cpp
+)
+target_include_directories(algo_core PUBLIC include)
 
 # ====================
 # Library & Executable
@@ -60,25 +65,23 @@ target_include_directories(ground_node_lib PUBLIC
   include
   ${GENERATED_ROSIDL_CPP_DIR}
 )
+target_link_libraries(ground_node_lib
+  algo_core
+)
 
 # Small executable that just provides main() and links the lib
 add_executable(ground_node
   src/middleware/main.cpp
 )
-target_link_libraries(ground_node ground_node_lib)
+target_link_libraries(ground_node
+  ground_node_lib
+)
 
-add_dependencies(ground_node_lib ${PROJECT_NAME}__rosidl_generator_cpp)
-add_dependencies(ground_node     ${PROJECT_NAME}__rosidl_generator_cpp)
+# Make sure our targets are built after generated interfaces exist
+add_dependencies(ground_node_lib ${PROJECT_NAME}__rosidl_generator_cpp ${PROJECT_NAME}__rosidl_typesupport_cpp)
+add_dependencies(ground_node     ${PROJECT_NAME}__rosidl_generator_cpp ${PROJECT_NAME}__rosidl_typesupport_cpp)
 
-# Make sure generated typesupport libs are available before linking
-add_dependencies(ground_node_lib ${PROJECT_NAME}__rosidl_typesupport_cpp)
-add_dependencies(ground_node     ${PROJECT_NAME}__rosidl_typesupport_cpp)
-
-# Link against the C++ typesupport for generated action
-target_link_libraries(ground_node_lib ${PROJECT_NAME}__rosidl_typesupport_cpp)
-target_link_libraries(ground_node     ${PROJECT_NAME}__rosidl_typesupport_cpp)
-
-# Link target dependencies
+# Link to ROS deps (AFTER targets are created)
 ament_target_dependencies(ground_node_lib
   rclcpp rclcpp_lifecycle rclcpp_action std_msgs lifecycle_msgs rcl_interfaces std_srvs
   rosidl_default_runtime
@@ -87,6 +90,10 @@ ament_target_dependencies(ground_node
   rclcpp rclcpp_lifecycle rclcpp_action std_msgs lifecycle_msgs rcl_interfaces std_srvs
   rosidl_default_runtime
 )
+
+# Also link typesupport (actions)
+target_link_libraries(ground_node_lib ${PROJECT_NAME}__rosidl_typesupport_cpp)
+target_link_libraries(ground_node     ${PROJECT_NAME}__rosidl_typesupport_cpp)
 
 # =======
 # Install
@@ -118,13 +125,20 @@ endif()
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
 
-  # Pure C++ FSM test
+  # Pure C++ algorithm test (no ROS deps)
+  ament_add_gtest(test_algorithm tests/test_algorithm.cpp)
+  if(TARGET test_algorithm)
+    target_include_directories(test_algorithm PRIVATE include)
+    target_link_libraries(test_algorithm algo_core)
+  endif()
+
+  # FSM test
   ament_add_gtest(test_state_machine tests/test_state_machine.cpp)
   if(TARGET test_state_machine)
     target_include_directories(test_state_machine PRIVATE include)
   endif()
 
-  # Parameter handling test (links to node implementation)
+  # Parameter handling test
   ament_add_gtest(test_params tests/test_params.cpp)
   if(TARGET test_params)
     target_include_directories(test_params PRIVATE include)
@@ -132,7 +146,7 @@ if(BUILD_TESTING)
     target_link_libraries(test_params ground_node_lib)
   endif()
 
-  # Pub/Sub test with executor + lifecycle transitions
+  # Pub/Sub test
   ament_add_gtest(test_pubsub tests/test_pubsub.cpp)
   if(TARGET test_pubsub)
     target_include_directories(test_pubsub PRIVATE include)
@@ -149,16 +163,13 @@ if(BUILD_TESTING)
       include
       ${GENERATED_ROSIDL_CPP_DIR}
     )
-  ament_target_dependencies(test_services_actions
-    rclcpp rclcpp_lifecycle rclcpp_action std_msgs lifecycle_msgs rcl_interfaces std_srvs
-    rosidl_default_runtime
-  )
-  target_link_libraries(test_services_actions ground_node_lib ${PROJECT_NAME}__rosidl_typesupport_cpp)
-  add_dependencies(test_services_actions ${PROJECT_NAME}__rosidl_generator_cpp ${PROJECT_NAME}__rosidl_typesupport_cpp)
-endif()
+    ament_target_dependencies(test_services_actions
+      rclcpp rclcpp_lifecycle rclcpp_action std_msgs lifecycle_msgs rcl_interfaces std_srvs
+      rosidl_default_runtime
+    )
+    target_link_libraries(test_services_actions ground_node_lib ${PROJECT_NAME}__rosidl_typesupport_cpp)
+    add_dependencies(test_services_actions ${PROJECT_NAME}__rosidl_generator_cpp ${PROJECT_NAME}__rosidl_typesupport_cpp)
+  endif()
 endif()
 
-# =======
-# Package
-# =======
 ament_package()
